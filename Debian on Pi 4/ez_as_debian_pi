@@ -1,0 +1,258 @@
+#!/bin/bash
+
+trap cleanup EXIT
+
+
+cleanup ()
+{
+  if [[ -n "$cleaned_up_already" ]]; then
+    return
+  fi
+
+  if [[ "$1" == "full" && -d "$ez_as_pi" ]]; then
+    echo "Cleaning up temporary directory ${ez_as_pi}..."
+    rm -rf "$ez_as_pi"
+  fi
+
+  if [[ -n "$mounted_iso" && -n "$(mount | grep "$mounted_iso")" ]]; then
+    echo "Unmounting what we mounted and removing mount points we created..."
+    echoed_cleanup_msg="yes"
+    umount "$mounted_iso"
+    rmdir "$mounted_iso"
+  fi
+
+  if [[ -n "$mounted_efi_partition" && -n "$(mount | grep "$mounted_efi_partition")" ]]; then
+    [[ -z "$echoed_cleanup_msg" ]] && echo "Unmounting what we mounted and removing mount points we created..."
+    umount "$mounted_efi_partition"
+    rmdir "$mounted_efi_partition"
+  fi
+
+  [[ -n "$echoed_cleanup_msg" ]] && echo -e "\x1b[1;34mDone cleaning up.\x1b[0m"
+  cleaned_up_already="true"
+}
+
+show-help ()
+{
+  echo "This script will assist you in booting Vanilla Debian 11 (or later) on your Pi 4."
+  echo
+  echo "Author"
+  echo "  Hackysack (https://github/H4CKY54CK)"
+  echo
+  echo "Usage"
+  echo "  sudo $0"
+  echo "  sudo $0 (PATH)"
+  echo "  sudo $0 [OPTIONS] (PATH)"
+  echo
+  echo "PATH would be the path to your device to turn into a bootable. It will prompt you for it if not provided."
+  echo
+  echo "Options"
+  echo "  --no-prompts"
+  echo "      Equivalent to using --no-confirm and --default"
+  echo "  --no-confirm"
+  echo "      Don't ask for confirmation before doing things. (can be dangerous if you're careless AKA a normal person)"
+  echo "  --default"
+  echo "      Use default for as many prompts as possible (the only prompt unaffected is the one that asks for the device path)"
+  echo
+}
+
+
+ez_as_pi="/tmp/ez-as-debianpi"
+
+declare -A args
+
+args[bootable]=""
+args[default]=""
+
+while (( "$#" )); do
+  case $1 in
+    -h | --help )
+      show-help
+      exit
+      ;;
+    --no-prompts )
+      args[noconfirm]="yes"
+      args[default]="yes"
+      shift
+      ;;
+    --no-confirm )
+      args[noconfirm]="yes"
+      shift
+      ;;
+    --default )
+      args[default]="yes"
+      shift
+      ;;
+    * )
+      if [[ "$#" -eq 1 ]]; then
+        args[bootable]="$1"
+      else
+        echo "too many remaining args"
+        exit 1
+      fi
+      shift
+      ;;
+  esac
+done
+
+
+# Ensure we are root
+if [[ "$EUID" != 0 ]]; then
+  echo "This script must be run as root or with sudo."
+  exit 1
+fi
+
+# Attempt to pick up where we left off with a previous session
+if [[ -d "$ez_as_pi" ]]; then
+  echo -e "\x1b[1;33mRe-using existing temporary directory...\x1b[0m"
+else
+  mkdir $ez_as_pi
+fi
+
+# Get RPi UEFI Firmware
+rpi_firmware="${ez_as_pi}/rpi_firmware.zip"
+if [[ -f "$rpi_firmware" ]]; then
+  echo -e "\x1b[1;33mRe-using existing RPi UEFI Firmware files...\x1b[0m"
+elif [[ -z "${args[default]}" ]]; then
+  read -p "Enter full path to RPi UEFI Firmware zip file (leave blank to download it): " rpi_firmware
+  if [[ -z "$rpi_firmware" ]]; then
+    ## I'm not sure how "portable" this will end up being, but I thought it was fairly clever.
+    rpi_ver="$(curl -s -i "https://api.github.com/repos/pftf/rpi4/releases/latest" | grep zipball | grep -Eo "v[0-9]\.[0-9]+")"
+    rpi_firmware="${ez_as_pi}/rpi_firmware.zip"
+    echo "Downloading RPi UEFI Firmware zip file..."
+    wget -q --show-progress "https://github.com/pftf/RPi4/releases/download/${rpi_ver}/RPi4_UEFI_Firmware_${rpi_ver}.zip" -O $rpi_firmware
+  fi
+  echo
+else
+  rpi_ver="$(curl -s -i "https://api.github.com/repos/pftf/rpi4/releases/latest" | grep zipball | grep -Eo "v[0-9]\.[0-9]+")"
+  rpi_firmware="${ez_as_pi}/rpi_firmware.zip"
+  echo "Downloading RPi UEFI Firmware zip file..."
+  wget -q --show-progress "https://github.com/pftf/RPi4/releases/download/${rpi_ver}/RPi4_UEFI_Firmware_${rpi_ver}.zip" -O $rpi_firmware
+  echo
+fi
+
+# Get ISO
+iso_file="${ez_as_pi}/debian-testing-arm64-netinst.iso"
+if [[ -f "$iso_file" ]]; then
+  echo -e "\x1b[1;33mRe-using existing debian ISO...\x1b[0m"
+elif [[ -z "${args[default]}" ]]; then
+  read -p "Enter full path to debian ISO file (leave blank to download it): " iso_file
+  if [[ -z "$iso_file" ]]; then
+    echo "Downloading debian net install ISO for ARM64..."
+    wget -q --show-progress "https://cdimage.debian.org/cdimage/weekly-builds/arm64/iso-cd/debian-testing-arm64-netinst.iso" -O $iso_file
+    iso_file="${ez_as_pi}/debian-testing-arm64-netinst.iso"
+  fi
+  echo
+else
+  wget -q --show-progress "https://cdimage.debian.org/cdimage/weekly-builds/arm64/iso-cd/debian-testing-arm64-netinst.iso" -O $iso_file
+  iso_file="${ez_as_pi}/debian-testing-arm64-netinst.iso"
+  echo
+fi
+
+# Verify ISO if downloaded
+if [[ -f "${ez_as_pi}/debian-testing-arm64-netinst.iso" ]]; then
+  sha_file="${ez_as_pi}/SHA512SUMS"
+  if [[ ! -f "$sha_file" ]]; then
+    wget -q --show-progress "https://cdimage.debian.org/cdimage/weekly-builds/arm64/iso-cd/SHA512SUMS" -O $sha_file
+  fi
+
+  echo -e "\x1b[1;33mVerifying checksums...\x1b[0m"
+  check_sum_file="$(cat $sha_file | awk '{print $1}')"
+  check_sum_iso="$(shasum -a 512 $iso_file | awk '{print $1}')"
+  if [[ "$check_sum_file" != "$check_sum_iso" ]]; then
+    echo "Checksums did not match."
+    exit 1
+  fi
+  echo -e "\x1b[1;32mChecksums match!\x1b[0m"
+fi
+echo
+
+# Get bootable-to-be
+if [[ -z "${args[bootable]}" ]]; then
+  echo "Enter the path to the device you want to create a bootable with (i.e. /dev/sdb )"
+  echo -e "\x1b[33mTHIS WILL DELETE ALL PARTITIONS ON THAT DEVICE! CHOOSE CAREFULLY!\x1b[0m"
+  read -p "Path to device to create bootable with: " bootable_device
+  if [[ -z "$bootable_device" ]]; then
+    echo "No path provided! Exiting..."
+    exit 1
+  fi
+else
+  bootable_device="${args[bootable]}"
+fi
+echo
+
+# Double check with user unless --default was used
+if [[ -z "${args[noconfirm]}" ]]; then
+  echo -e "\x1b[1;33mSANITY CHECK...\x1b[0m"
+  echo
+  echo -e "Debian ISO: \x1b[34m$iso_file\x1b[0m"
+  echo -e "RPi UEFI Firmware zipfile: \x1b[34m$rpi_firmware\x1b[0m"
+  echo -e "Chosen device: \x1b[34m$bootable_device\x1b[0m"
+  read -p "Is this correct? [y/N]: " are_you_sure
+  case $are_you_sure in
+    [yY][eE][sS]|[yY] )
+      echo "defaulted."
+      ;;
+    * )
+      echo "Cancelling..."
+      exit 1
+      ;;
+  esac
+fi
+
+# Create bootable
+
+set -e
+
+## Format device, create EFI partition with 400 MB
+## Guide says 350 MB, but that's not enough at the time of writing this.
+parted --script -a optimal "$bootable_device" \
+  mklabel gpt \
+  mkpart primary fat32 1MiB 360MiB \
+  set 1 esp on
+
+## Check that we only have a single partition on the device...
+partitions_on_bootable=($(lsblk -lpo NAME | grep $bootable_device))
+if [[ "${#partitions_on_bootable[@]}" != 2 ]]; then
+  echo "For some reason, there are too many partitions on the target device. Exiting..."
+  exit 1
+fi
+
+## And then we use it.
+efi_partition="$(lsblk -lpo NAME | grep -E "^${bootable_device}.?1$")"
+
+## Format partition
+mkfs.vfat "${efi_partition}"
+
+## I was trying to be clever, ok?
+## Create unique mounting point, and mount the thing to it.
+i=0
+while [[ -d "/mnt/iso${i}" ]]; do
+  (( i++ ))
+done
+mounted_iso="/mnt/iso${i}"
+mkdir "$mounted_iso"
+mount -o loop "$iso_file" "$mounted_iso"
+
+## Do it again for the other thing.
+j=0
+while [[ -d "/mnt/part${j}" ]]; do
+  (( j++ ))
+done
+mounted_efi_partition="/mnt/part${j}"
+mkdir "$mounted_efi_partition"
+mount "$efi_partition" "$mounted_efi_partition"
+
+## Need to set +e or else we don't get past the rsync (it gives a non-zero exit status because it fails to copy the symlinks)
+set +e
+
+## Extract ISO and RPi UEFI Firmware to bootable
+rsync -av "$mounted_iso/" "$mounted_efi_partition"
+unzip "$rpi_firmware" -d "$mounted_efi_partition"
+
+
+cleanup full
+
+echo "You should be able to unplug your bootable and stick it in your Pi 4 now."
+echo
+echo "Oh, and don't forget to disable the 3 GB RAM limit in the UEFI settings of your Pi 4. For more info, see the README for this script."
+echo "https://github.com/H4CKY54CK/helpful-scripts/blob/main/README.md#post-install"
