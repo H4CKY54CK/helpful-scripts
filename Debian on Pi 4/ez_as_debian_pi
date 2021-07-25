@@ -9,10 +9,11 @@ cleanup ()
     return
   fi
 
-  if [[ "$1" == "full" && -d "$ez_as_pi" ]]; then
-    echo "Cleaning up temporary directory ${ez_as_pi}..."
-    rm -rf "$ez_as_pi"
-  fi
+  ## /tmp gets cleared on reboot anyway and having the files cached can be nice
+  # if [[ "$1" == "full" && -d "$ez_as_pi" ]]; then
+  #   echo "Cleaning up temporary directory ${ez_as_pi}..."
+  #   rm -rf "$ez_as_pi"
+  # fi
 
   if [[ -n "$mounted_iso" && -n "$(mount | grep "$mounted_iso")" ]]; then
     echo "Unmounting what we mounted and removing mount points we created..."
@@ -40,10 +41,6 @@ show-help ()
   echo
   echo "Usage"
   echo "  sudo $0"
-  echo "  sudo $0 (PATH)"
-  echo "  sudo $0 [OPTIONS] (PATH)"
-  echo
-  echo "PATH would be the path to your device to turn into a bootable. It will prompt you for it if not provided."
   echo
   echo "Options"
   echo "  --no-prompts"
@@ -65,6 +62,10 @@ args[default]=""
 
 while (( "$#" )); do
   case $1 in
+    clean | -clean | --clean )
+      cleanup full
+      exit
+      ;;
     -h | --help )
       show-help
       exit
@@ -138,13 +139,13 @@ elif [[ -z "${args[default]}" ]]; then
   read -p "Enter full path to debian ISO file (leave blank to download it): " iso_file
   if [[ -z "$iso_file" ]]; then
     echo "Downloading debian net install ISO for ARM64..."
-    wget -q --show-progress "https://cdimage.debian.org/cdimage/weekly-builds/arm64/iso-cd/debian-testing-arm64-netinst.iso" -O $iso_file
     iso_file="${ez_as_pi}/debian-testing-arm64-netinst.iso"
+    wget -q --show-progress "https://cdimage.debian.org/cdimage/weekly-builds/arm64/iso-cd/debian-testing-arm64-netinst.iso" -O $iso_file
   fi
   echo
 else
-  wget -q --show-progress "https://cdimage.debian.org/cdimage/weekly-builds/arm64/iso-cd/debian-testing-arm64-netinst.iso" -O $iso_file
   iso_file="${ez_as_pi}/debian-testing-arm64-netinst.iso"
+  wget -q --show-progress "https://cdimage.debian.org/cdimage/weekly-builds/arm64/iso-cd/debian-testing-arm64-netinst.iso" -O $iso_file
   echo
 fi
 
@@ -190,7 +191,6 @@ if [[ -z "${args[noconfirm]}" ]]; then
   read -p "Is this correct? [y/N]: " are_you_sure
   case $are_you_sure in
     [yY][eE][sS]|[yY] )
-      echo "defaulted."
       ;;
     * )
       echo "Cancelling..."
@@ -207,7 +207,7 @@ set -e
 ## Guide says 350 MB, but that's not enough at the time of writing this.
 parted --script -a optimal "$bootable_device" \
   mklabel gpt \
-  mkpart primary fat32 1MiB 360MiB \
+  mkpart primary fat32 1MiB 500MiB \
   set 1 esp on
 
 ## Check that we only have a single partition on the device...
@@ -249,6 +249,7 @@ set +e
 rsync -av "$mounted_iso/" "$mounted_efi_partition"
 unzip "$rpi_firmware" -d "$mounted_efi_partition"
 
+cp "$mounted_efi_partition/firmware/brcm/brcmfmac43455-sdio.Raspberry" "$mounted_efi_partition/firmware/brcm/brcmfmac43455-sdio.Raspberry Pi Foundation-Raspberry Pi 4 Model B.txt"
 
 cleanup full
 
